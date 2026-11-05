@@ -45,6 +45,10 @@ nsis:
   shortcutName: AuroraStream
   deleteAppDataOnUninstall: false
   artifactName: AuroraStream-Setup-${version}.exe
+  # script NSIS customizado (gerado por build-nsis-no-wine.sh): gera o
+  # desinstalador via WriteUninstaller na instalação — elimina a etapa
+  # obrigatória de wine do electron-builder em Linux/CI
+  script: installer.nsi
 
 linux:
   target:

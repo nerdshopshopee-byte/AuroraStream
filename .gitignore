@@ -54,3 +54,15 @@ server.log
 /skills/
 # AuroraStream: banco JSON local (contas/favoritos/progresso)
 /data/
+
+# AuroraStream: artefatos de build (gerados localmente, não versionar)
+/apk-www/
+/out-build/
+/desktop/app-bundle/
+/desktop/dist/
+/desktop/ffmpeg/
+/desktop/build/
+/android/.gradle/
+/android/app/build/
+/android/build/
+/android/local.properties

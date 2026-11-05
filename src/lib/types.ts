@@ -136,14 +136,23 @@ export function proxyStreamUrl(url: string): string {
   return `/api/stream?u=${encodeURIComponent(url)}`
 }
 
+/**
+ * Envelopa uma URL para o modo REMUX do ffmpeg (`-c copy`, sem reencodar).
+ * Resolve o "Bufferizando..." eterno: painéis IPTV costumam responder ao
+ * .m3u8 com um fluxo TS bruto/infinito que o hls.js nunca termina de baixar —
+ * o remux converte TS→fMP4 em tempo real com CPU quase zero (serve 4K). */
+export function remuxStreamUrl(url: string): string {
+  return `/api/transcode?u=${encodeURIComponent(url)}&mode=remux`
+}
+
 /** Extensões de arquivo direto (VOD) — tocáveis via <video> ou transcodificação */
-const DIRECT_FILE_RE = /\.(mp4|m4v|webm|mov|mkv|avi|wmv|flv|mpg|mpeg|m2ts|3gp|ogv|vob|asf)(\?|#|$)/i
+const DIRECT_FILE_RE = /\.(mp4|m4v|webm|mov|mkv|avi|wmv|flv|mpg|mpeg|m2ts|ts|3gp|ogv|vob|asf)(\?|#|$)/i
 
 /**
  * Containers que o navegador NÃO reproduz nativamente (MKV/AVI/WMV/FLV/MPG…).
  * Precisam passar pela rota de transcodificação (/api/transcode, ffmpeg).
  */
-const NEEDS_TRANSCODE_RE = /\.(mkv|avi|wmv|flv|mpg|mpeg|m2ts|vob|asf|3gp)(\?|#|$)/i
+const NEEDS_TRANSCODE_RE = /\.(mkv|avi|wmv|flv|mpg|mpeg|m2ts|ts|vob|asf|3gp)(\?|#|$)/i
 
 /** True quando a URL aponta para um arquivo direto (VOD) em vez de playlist HLS */
 export function isDirectFile(url: string): boolean {

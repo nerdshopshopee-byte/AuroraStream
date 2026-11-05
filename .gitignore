@@ -52,19 +52,13 @@ prompt
 server.log
 # Skills directory
 /skills/
-
-# AuroraStream — dados locais do usuário (contém credenciais IPTV: nunca publicar)
-/data/
-/db/
-*.db
-
-# AuroraStream — builds desktop e binários pesados
-.zscripts/
-/desktop/dist/
-/desktop/dist_electron/
-/desktop/app-bundle/
-/desktop/ffmpeg/
-*.exe
-*.AppImage
-*.apk
-*.deb
+# APK/Capacitor — gerados
+/apk-www/
+/out-build/
+/out/
+/android/.gradle/
+/android/build/
+/android/app/build/
+/android/app/src/main/assets/public/
+/android/local.properties
+/android/.idea/

@@ -93,6 +93,12 @@ export async function GET(req: NextRequest) {
       },
       redirect: 'follow',
       cache: 'no-store',
+      // ESSENCIAL para IPTV: aborta o fetch upstream quando o cliente
+      // desconecta (troca de canal, fechar player, timeout do hls.js).
+      // Sem isso, conexões órfãs continuam ocupando slots no painel —
+      // provedores limitam conexões simultâneas e os próximos segmentos
+      // ficam pendurados: o sintoma é exatamente "Bufferizando..." eterno.
+      signal: req.signal,
       ...(isPlaylist(target.toString(), '') ? { signal: AbortSignal.timeout(30_000) } : {}),
     })
   } catch (err) {

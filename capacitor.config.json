@@ -1,0 +1,13 @@
+{
+  "appId": "com.aurorastream.player",
+  "appName": "AuroraStream",
+  "webDir": "apk-www",
+  "server": {
+    "androidScheme": "http"
+  },
+  "plugins": {
+    "CapacitorHttp": {
+      "enabled": true
+    }
+  }
+}

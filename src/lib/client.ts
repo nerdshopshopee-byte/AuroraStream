@@ -19,6 +19,19 @@ import type {
   XtreamVodInfo,
   XtreamVodStream,
 } from './xtream'
+import { buildApiUrl } from './xtream'
+import {
+  directDemoCatalog,
+  directFavorites,
+  directLogin,
+  directLogout,
+  directProgress,
+  directSaveProgressRow,
+  directSession,
+  directToggleFavorite,
+  directXtreamQ,
+  isNativeDirect,
+} from './direct'
 
 // ---------- cache local ----------
 
@@ -114,6 +127,8 @@ async function json<T>(url: string, init?: RequestInit): Promise<T> {
 // ---------- sessão ----------
 
 export async function apiSession(): Promise<SessionInfo | null> {
+  // APK nativo: sessão vive no localStorage (não há servidor)
+  if (isNativeDirect()) return directSession()
   const r = await json<{ session: SessionInfo | null }>('/api/auth/session')
   return r.session
 }
@@ -124,6 +139,7 @@ export async function apiLogin(payload: {
   username?: string
   password?: string
 }): Promise<SessionInfo> {
+  if (isNativeDirect()) return directLogin(payload)
   const r = await json<{ session: SessionInfo }>('/api/auth/login', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -133,6 +149,10 @@ export async function apiLogin(payload: {
 }
 
 export async function apiLogout() {
+  if (isNativeDirect()) {
+    directLogout()
+    return
+  }
   await fetch('/api/auth/logout', { method: 'POST' })
 }
 
@@ -185,8 +205,11 @@ async function qRetry(q: (action: string) => Promise<unknown>, action: string): 
 }
 
 export async function loadXtreamCatalog(): Promise<XtreamCatalogData> {
-  const q = (action: string, extra = '') =>
-    json<{ data: unknown }>(`/api/xtream?action=${action}${extra}`).then((r) => r.data)
+  const nativeQ = isNativeDirect()
+  const q = (action: string) =>
+    nativeQ
+      ? directXtreamQ()(action) // APK: vai direto ao painel Xtream
+      : json<{ data: unknown }>(`/api/xtream?action=${action}`).then((r) => r.data)
 
   // allSettled: UMA seção lenta/offline não pode derrubar o catálogo inteiro
   // (antes, qualquer falha deixava o app girando em carregamento eterno)
@@ -292,6 +315,8 @@ export async function loadXtreamCatalog(): Promise<XtreamCatalogData> {
 }
 
 export async function loadDemoCatalog(): Promise<XtreamCatalogData> {
+  // APK nativo: catálogo demo montado no cliente (não há /api/catalog)
+  if (isNativeDirect()) return directDemoCatalog()
   const data = await cached<DemoCatalog>('demo:catalog', CLIENT_TTL.catalog, async () =>
     json<{ data: DemoCatalog }>('/api/catalog').then((r) => r.data),
   )
@@ -330,10 +355,16 @@ export async function loadSeriesInfo(
   const payload = await cached(
     `xt:series:${item.id}`,
     CLIENT_TTL.seriesInfo,
-    () =>
-      json<{ data: XtreamSeriesInfo }>(
+    async (): Promise<XtreamSeriesInfo> => {
+      if (isNativeDirect()) {
+        return (await directXtreamQ()('get_series_info', {
+          series_id: item.id,
+        })) as XtreamSeriesInfo
+      }
+      return json<{ data: XtreamSeriesInfo }>(
         `/api/xtream?action=get_series_info&series_id=${encodeURIComponent(item.id)}`,
-      ).then((r) => r.data),
+      ).then((r) => r.data)
+    },
   )
   const seasonsSet = new Set<number>()
   const episodes: Record<number, EpisodeItem[]> = {}
@@ -389,10 +420,16 @@ export async function loadVodInfo(item: MediaItem): Promise<VodInfo> {
   const payload = await cached(
     `xt:vod:${item.id}`,
     CLIENT_TTL.vodInfo,
-    () =>
-      json<{ data: XtreamVodInfo }>(
+    async (): Promise<XtreamVodInfo> => {
+      if (isNativeDirect()) {
+        return (await directXtreamQ()('get_vod_info', {
+          vod_id: item.id,
+        })) as XtreamVodInfo
+      }
+      return json<{ data: XtreamVodInfo }>(
         `/api/xtream?action=get_vod_info&vod_id=${encodeURIComponent(item.id)}`,
-      ).then((r) => r.data),
+      ).then((r) => r.data)
+    },
   )
   const info = payload.info ?? {}
   return {
@@ -477,10 +514,16 @@ export async function loadEpgPrograms(channel: MediaItem): Promise<EpgProgram[]>
   const payload = await cached<{ epg_listings?: XtreamEpgListing[] }>(
     `xt:epg:${channel.id}`,
     CLIENT_TTL.epg,
-    () =>
-      json<{ data: { epg_listings?: XtreamEpgListing[] } }>(
+    async () => {
+      if (isNativeDirect()) {
+        return (await directXtreamQ()('get_simple_data_table', {
+          stream_id: channel.id,
+        })) as { epg_listings?: XtreamEpgListing[] }
+      }
+      return json<{ data: { epg_listings?: XtreamEpgListing[] } }>(
         `/api/xtream?action=get_simple_data_table&stream_id=${encodeURIComponent(channel.id)}`,
-      ).then((r) => r.data),
+      ).then((r) => r.data)
+    },
   )
   const listings = payload.epg_listings ?? []
   const out: EpgProgram[] = []
@@ -526,11 +569,13 @@ export interface ProgressRow {
 }
 
 export async function loadFavorites(): Promise<FavoriteRow[]> {
+  if (isNativeDirect()) return directFavorites()
   const r = await json<{ data: FavoriteRow[] }>('/api/favorites')
   return r.data
 }
 
 export async function toggleFavoriteRow(item: MediaItem): Promise<boolean> {
+  if (isNativeDirect()) return directToggleFavorite(item)
   const r = await json<{ favorited: boolean }>('/api/favorites', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -546,6 +591,7 @@ export async function toggleFavoriteRow(item: MediaItem): Promise<boolean> {
 }
 
 export async function loadProgress(): Promise<ProgressRow[]> {
+  if (isNativeDirect()) return directProgress()
   const r = await json<{ data: ProgressRow[] }>('/api/progress')
   return r.data
 }
@@ -561,6 +607,10 @@ export async function saveProgressRow(p: {
   episode?: number | null
   episodeTitle?: string | null
 }) {
+  if (isNativeDirect()) {
+    directSaveProgressRow(p)
+    return
+  }
   await json('/api/progress', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -573,6 +623,16 @@ export async function saveProgressRow(p: {
 export async function measurePing(): Promise<number> {
   const t0 = performance.now()
   try {
+    if (isNativeDirect()) {
+      // APK: mede a latência direta ao painel Xtream
+      const s = directSession()
+      if (!s?.server) return -1
+      await fetch(buildApiUrl(s.server, s.username ?? '', s.password ?? ''), {
+        cache: 'no-store',
+        signal: AbortSignal.timeout(8_000),
+      })
+      return Math.round(performance.now() - t0)
+    }
     await fetch(`/api/ping?_=${Date.now()}`, { cache: 'no-store' })
     return Math.round(performance.now() - t0)
   } catch {

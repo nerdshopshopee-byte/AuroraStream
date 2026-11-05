@@ -24,10 +24,12 @@ import {
 } from 'lucide-react'
 import { useAurora } from '@/lib/store'
 import { loadEpgPrograms, loadSeriesInfo } from '@/lib/client'
+import { isNativeDirect } from '@/lib/direct'
 import {
   isDirectFile,
   needsTranscode,
   proxyStreamUrl,
+  remuxStreamUrl,
   transcodeStreamUrl,
   type EpgProgram,
   type EpisodeItem,
@@ -74,6 +76,8 @@ export function Player() {
   const item = player.episode ? player.item : player.item
   const src = (player.episode?.streamUrl ?? player.item.streamUrl) || ''
   const isLive = item.type === 'live' && !player.episode
+  /** APK nativo: sem servidor — as URLs brutas do painel são tocadas direto */
+  const noServer = isNativeDirect()
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -85,6 +89,10 @@ export function Player() {
   const nextEpRef = useRef<EpisodeItem | null>(null)
   const seekRef = useRef<HTMLDivElement>(null)
   const transcodeRef = useRef(false)
+  /** modo atual da rota ffmpeg: remux (-c copy) ou transcode (x264) */
+  const transcodeModeRef = useRef<'remux' | 'full'>('full')
+  /** falhas fatais de rede do hls.js em canais ao vivo (escala p/ remux) */
+  const liveFragFailRef = useRef(0)
   const watchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   /** janelas extras de 45 s enquanto o upstream responder — evita erro prematuro */
   const transcodePatienceRef = useRef(2)
@@ -147,28 +155,32 @@ export function Player() {
   const goNative = useCallback(
     (target?: string) => {
       const video = videoRef.current
-      if (!video || nativeFallbackRef.current) return false
+      if (!video || nativeFallbackRef.current || noServer) return false
       nativeFallbackRef.current = true
       hlsRef.current?.destroy()
       hlsRef.current = null
       setLevels([])
       setCurrentLevel(-1)
-      video.src = target ?? proxyStreamUrl(src)
+      video.src = target ?? src
       safePlay(video)
       return true
     },
-    [src],
+    [src, noServer],
   )
 
   /**
-   * Transcodificação ffmpeg (/api/transcode): MKV/AVI/WMV/FLV/MPG não são
-   * tocáveis pelos navegadores. `ss` reinicia o ffmpeg no offset indicado —
-   * é assim que o seek funciona em mídia transcodificada.
+   * Rota ffmpeg (/api/transcode) em dois modos:
+   *  - remux (-c copy): TV ao vivo e 4K — TS/HLS → fMP4 em tempo real, CPU ~zero.
+   *    Antídoto ao "Bufferizando..." eterno (painéis que respondem ao .m3u8 com
+   *    fluxo TS bruto/infinito que o hls.js jamais termina de baixar)
+   *  - full (x264 720p): MKV/AVI/WMV/FLV/MPG e codecs exóticos
+   * `ss` reinicia o ffmpeg no offset indicado — é assim que o seek funciona.
    */
   const startTranscode = useCallback(
-    (ss = 0) => {
+    (ss = 0, mode: 'remux' | 'full' = 'full') => {
       const video = videoRef.current
-      if (!video) return false
+      // APK nativo: não há ffmpeg server-side — sem transcode/remux
+      if (!video || noServer) return false
       if (!transcodeRef.current) {
         transcodeRef.current = true
         setTranscoding(true)
@@ -177,11 +189,12 @@ export function Player() {
         setLevels([])
         setCurrentLevel(-1)
       }
-      video.src = transcodeStreamUrl(src, ss)
+      transcodeModeRef.current = mode
+      video.src = mode === 'remux' ? remuxStreamUrl(src) : transcodeStreamUrl(src, ss)
       safePlay(video)
       return true
     },
-    [src],
+    [src, noServer],
   )
 
   /** Seek unificado: currentTime nativo ou reinício com -ss (transcodificado) */
@@ -242,11 +255,13 @@ export function Player() {
     const video = videoRef.current
     if (!video || !src) return
 
-    const url = proxyStreamUrl(src)
+    const url = noServer ? src : proxyStreamUrl(src)
     // reseta a cadeia de fallback a cada novo stream
     triedDirectRef.current = false
     nativeFallbackRef.current = false
     transcodeRef.current = false
+    transcodeModeRef.current = 'full'
+    liveFragFailRef.current = 0
     transcodePatienceRef.current = 2
 
     // zera a posição herdada do stream anterior no elemento de mídia —
@@ -278,6 +293,18 @@ export function Player() {
           startTranscode(startAt)
           return
         }
+        // AO VIVO: hls.js não entregou nem os metadados — no desktop escala para
+        // o remux (`-c copy`, antídoto do "Bufferizando..."); no APK (sem
+        // servidor) reporta o erro claramente
+        if (isLive && !transcodeRef.current && startTranscode(0, 'remux')) {
+          return
+        }
+        if (isLive && noServer) {
+          setError(
+            'O servidor do provedor não entregou vídeo a tempo (formato incomum ou stream offline).',
+          )
+          return
+        }
         if (transcodeRef.current && transcodePatienceRef.current > 0) {
           transcodePatienceRef.current -= 1
           scheduleWatchdog(45_000)
@@ -290,7 +317,7 @@ export function Player() {
         }
       }, ms)
     }
-    scheduleWatchdog(directFile ? 25_000 : 35_000)
+    scheduleWatchdog(directFile ? 25_000 : isLive ? 20_000 : 35_000)
 
     if (!directFile && Hls.isSupported()) {
       const hls = new Hls({
@@ -372,18 +399,27 @@ export function Player() {
               data.details === Hls.ErrorDetails.MANIFEST_PARSING_ERROR
             if (manifestFail) {
               // 1ª alternativa: URL direta sem o proxy (painéis com CORS liberado)
-              if (!triedDirectRef.current && !isDirectFile(src)) {
+              if (!triedDirectRef.current && !isDirectFile(src) && !noServer) {
                 triedDirectRef.current = true
                 hls.loadSource(src)
                 return
               }
+              // AO VIVO: <video> progressivo não toca TS bruto — vá ao remux
+              // (c copy, serve até 4K) antes do transcode pesado
+              if (isLive && startTranscode(0, 'remux')) return
               // 2ª alternativa: reprodução nativa progressiva via proxy (Range)
               if (goNative(url)) return
-              // 3ª alternativa: transcodificação ffmpeg
+              // 3ª alternativa: transcodificação ffmpeg (x264)
               if (startTranscode(0)) return
               // esgotou: mensagem clara para o usuário
               setError('Não foi possível carregar o stream do servidor. Verifique sua conexão ou o status do painel.')
               return
+            }
+            // falha em segmento (não-manifest): recupera; ao vivo, se persistir,
+            // escala para o remux em vez de girar indefinidamente
+            if (isLive) {
+              liveFragFailRef.current += 1
+              if (liveFragFailRef.current >= 2 && startTranscode(0, 'remux')) return
             }
             // tenta recuperar automaticamente
             hls.startLoad()
@@ -481,6 +517,8 @@ export function Player() {
     }
     const onVideoError = () => {
       if (transcodeRef.current) {
+        // remux falhou (codec não copiável p/ MP4, p.ex.) → escala p/ transcode
+        if (transcodeModeRef.current === 'remux' && startTranscode(0, 'full')) return
         setError('A transcodificação falhou — diagnóstico em andamento…')
         diagnoseTranscode(0)
         return

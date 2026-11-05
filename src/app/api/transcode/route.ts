@@ -16,16 +16,24 @@ function ffmpegBin(): string {
 }
 
 /**
- * Transcodificação sob demanda (fallback de compatibilidade):
+ * Transcodificação/remux sob demanda (fallback de compatibilidade):
  *
  * Navegadores não reproduzem Matroska (.mkv), AVI, WMV, FLV ou MPG — containers
  * legados comuns em catálogos IPTV. Esta rota invoca o ffmpeg do servidor para
  * converter o arquivo para fMP4 (H.264 + AAC) e transmite o resultado em
  * streaming progressivo, tocável pelo <video> nativo.
  *
+ * Dois modos:
+ *  - mode=transcode (padrão): reencoda x264 720p — para MKV/AVI e codecs exóticos
+ *  - mode=remux: `-c copy` (sem reencodar) — converte TS/HLS→fMP4 em tempo real
+ *    com CPU ~zero. É o antídoto ao "Bufferizando..." eterno em TV ao vivo:
+ *    painéis IPTV costumam responder ao .m3u8 com fluxo TS bruto/infinito que o
+ *    hls.js jamais termina de baixar, e o remux entrega até canais 4K
+ *
  * Parâmetros:
- *  - u  : URL de origem (http/https)
- *  - ss : offset inicial em segundos (seek por reinício do ffmpeg)
+ *  - u    : URL de origem (http/https)
+ *  - ss   : offset inicial em segundos (seek por reinício do ffmpeg)
+ *  - mode : remux | transcode
  *
  * Resolução do ffmpeg: variável AURORA_FFMPEG (binário embutido no app
  * desktop) → "ffmpeg" no PATH (servidor Linux com apt install ffmpeg).
@@ -62,6 +70,39 @@ export async function GET(req: NextRequest) {
 
   const ssRaw = Number(req.nextUrl.searchParams.get('ss') ?? '0')
   const ss = Number.isFinite(ssRaw) && ssRaw > 0 ? Math.floor(ssRaw) : 0
+  const mode = req.nextUrl.searchParams.get('mode') === 'remux' ? 'remux' : 'transcode'
+
+  // ---- saída ----
+  // remux: stream copy — zero CPU, latência ~1 keyframe, serve 4K
+  // transcode: x264 ultrafast 720p — compatibilidade máxima (codecs exóticos)
+  const outArgs =
+    mode === 'remux'
+      ? [
+          '-c', 'copy',
+          // timestamps de TS ao vivo costumam vir desordenados — regenera
+          '-fflags', '+genpts',
+          '-max_muxing_queue_size', '1024',
+          '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
+          '-f', 'mp4',
+          'pipe:1',
+        ]
+      : [
+          '-map', '0:v:0',
+          '-map', '0:a:0?',
+          '-c:v', 'libx264',
+          '-preset', 'ultrafast',
+          '-tune', 'zerolatency',
+          '-crf', '26',
+          '-vf', "scale=-2:'min(720,ih)'",
+          '-c:a', 'aac',
+          '-ac', '2',
+          '-b:a', '128k',
+          '-sn',
+          '-max_muxing_queue_size', '1024',
+          '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
+          '-f', 'mp4',
+          'pipe:1',
+        ]
 
   const args = [
     '-hide_banner',
@@ -78,21 +119,7 @@ export async function GET(req: NextRequest) {
     '-rw_timeout', '20000000',
     ...(ss > 0 ? ['-ss', String(ss)] : []),
     '-i', target.toString(),
-    '-map', '0:v:0',
-    '-map', '0:a:0?',
-    '-c:v', 'libx264',
-    '-preset', 'ultrafast',
-    '-tune', 'zerolatency',
-    '-crf', '26',
-    '-vf', "scale=-2:'min(720,ih)'",
-    '-c:a', 'aac',
-    '-ac', '2',
-    '-b:a', '128k',
-    '-sn',
-    '-max_muxing_queue_size', '1024',
-    '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
-    '-f', 'mp4',
-    'pipe:1',
+    ...outArgs,
   ]
 
   let child: ChildProcessByStdio<null, Readable, Readable>
@@ -163,7 +190,7 @@ export async function GET(req: NextRequest) {
     return new NextResponse(`Falha na transcodificação: ${detail}`, { status: 502 })
   }
   console.log(
-    `[transcode] primeiro chunk em ${Date.now() - t0} ms · ss=${ss} · ${target.host}`,
+    `[transcode:${mode}] primeiro chunk em ${Date.now() - t0} ms · ss=${ss} · ${target.host}`,
   )
 
   const stream = new ReadableStream<Uint8Array>({

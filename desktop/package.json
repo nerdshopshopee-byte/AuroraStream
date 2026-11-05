@@ -1,0 +1,17 @@
+{
+  "name": "aurorastream",
+  "productName": "AuroraStream",
+  "version": "1.6.0",
+  "description": "AuroraStream — Player IPTV Xtream Codes (Filmes • Séries • TV • Futebol)",
+  "main": "main.js",
+  "private": true,
+  "author": "AuroraStream",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "33.4.11",
+    "electron-builder": "25.1.8"
+  },
+  "allowScripts": {
+    "electron@33.4.11": true
+  }
+}

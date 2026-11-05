@@ -1,0 +1,61 @@
+appId: com.aurorastream.player
+productName: AuroraStream
+copyright: AuroraStream
+
+directories:
+  output: dist
+  buildResources: build
+
+files:
+  - main.js
+  - package.json
+
+# código do servidor Next standalone vai como resource (fora do asar)
+extraResources:
+  - from: ./app-bundle
+    to: server
+
+asar: true
+compression: normal
+buildVersion: "1.6.0"
+
+# reduz ~35 MB: mantém apenas pt-BR/en-US dos locales do Electron
+electronLanguages:
+  - pt-BR
+  - en-US
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  # ambiente Linux sem wine: sem assinatura/edição de recursos do .exe
+  # (o ícone da janela continua o AuroraStream via BrowserWindow.icon)
+  signAndEditExecutable: false
+  extraResources:
+    - from: ./ffmpeg/win64
+      to: ffmpeg
+
+nsis:
+  oneClick: true
+  runAfterFinish: true
+  perMachine: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: AuroraStream
+  deleteAppDataOnUninstall: false
+  artifactName: AuroraStream-Setup-${version}.exe
+
+linux:
+  target:
+    - target: AppImage
+      arch:
+        - x64
+  category: Video
+  maintainer: AuroraStream
+  extraResources:
+    - from: ./ffmpeg/linux64
+      to: ffmpeg
+
+appImage:
+  artifactName: AuroraStream-${version}-linux-x86_64.AppImage

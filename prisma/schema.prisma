@@ -1,0 +1,55 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// Conta/sessao do usuario do player (Xtream Codes ou modo demo)
+model Account {
+  id        String   @id @default(uuid())
+  token     String   @unique @default(uuid()) // cookie httpOnly de sessao
+  mode      String   @default("demo")         // "xtream" | "demo"
+  server    String?  // DNS do painel Xtream (http://host:porta)
+  username  String?
+  password  String?
+  label     String?  // nome exibido no dashboard
+  createdAt DateTime @default(now())
+  lastSeen  DateTime @default(now())
+  favorites Favorite[]
+  progress  WatchProgress[]
+}
+
+model Favorite {
+  id        String   @id @default(cuid())
+  accountId String
+  account   Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  mediaId   String
+  mediaType String // live | movie | series
+  title     String
+  poster    String?
+  category  String?
+  createdAt DateTime @default(now())
+
+  @@unique([accountId, mediaId, mediaType])
+}
+
+model WatchProgress {
+  id          String   @id @default(cuid())
+  accountId   String
+  account     Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  mediaId     String
+  mediaType   String // live | movie | series
+  title       String
+  poster      String?
+  season      Int?
+  episode     Int?
+  episodeTitle String?
+  positionSec Float    @default(0)
+  durationSec Float    @default(0)
+  updatedAt   DateTime @updatedAt
+
+  @@unique([accountId, mediaId])
+}

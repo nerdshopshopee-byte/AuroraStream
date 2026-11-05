@@ -82,6 +82,15 @@ export async function GET(req: NextRequest) {
   }
 
   const range = req.headers.get('range') ?? undefined
+  // playlists (.m3u8): teto de 30 s; segmentos/mídia: sem teto próprio.
+  // AbortSignal.any COMBINA o abort do cliente (req.signal) com o timeout —
+  // na v1.7 o timeout SUBSTITUÍA req.signal em playlists: ao trocar de canal
+  // o fetch órfão continuava preso no painel, ocupando um slot de conexão
+  // (painéis IPTV limitam conexões simultâneas → próximos plays não carregam)
+  const isPl = isPlaylist(target.toString(), '')
+  const upstreamSignal = isPl
+    ? AbortSignal.any([req.signal, AbortSignal.timeout(30_000)])
+    : req.signal
 
   let upstream: Response
   try {
@@ -98,8 +107,7 @@ export async function GET(req: NextRequest) {
       // Sem isso, conexões órfãs continuam ocupando slots no painel —
       // provedores limitam conexões simultâneas e os próximos segmentos
       // ficam pendurados: o sintoma é exatamente "Bufferizando..." eterno.
-      signal: req.signal,
-      ...(isPlaylist(target.toString(), '') ? { signal: AbortSignal.timeout(30_000) } : {}),
+      signal: upstreamSignal,
     })
   } catch (err) {
     const msg = err instanceof Error && err.name === 'TimeoutError'

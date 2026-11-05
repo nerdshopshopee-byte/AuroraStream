@@ -1,5 +1,6 @@
 'use client'
 
+import { useCallback } from 'react'
 import { useAurora } from '@/lib/store'
 import type { MediaItem } from '@/lib/types'
 import { ContentRow } from '../ContentRow'
@@ -21,6 +22,20 @@ export function RowsArea({ emptyMessage }: { emptyMessage: string }) {
   const select = useAurora((s) => s.select)
   const play = useAurora((s) => s.play)
   const openGrid = useAurora((s) => s.openGrid)
+  const openDetails = useAurora((s) => s.openDetails)
+
+  /**
+   * Clique/Enter num card: séries NÃO têm streamUrl própria — o play direto
+   * montava `/series/{series_id}.mp4` (404 → "não carrega"). Mesma regra do
+   * Dashboard (Enter) e da GridView: série → ficha com episódios.
+   */
+  const onPlay = useCallback(
+    (item: MediaItem) => {
+      if (item.type === 'series') openDetails(item)
+      else play(item, null, item.resumeAt ?? 0)
+    },
+    [openDetails, play],
+  )
 
   if (rows.length === 0) {
     return (
@@ -42,7 +57,7 @@ export function RowsArea({ emptyMessage }: { emptyMessage: string }) {
           selectedIdx={selectedByRow[i] ?? 0}
           active={i === activeRow}
           onSelect={select}
-          onPlay={play}
+          onPlay={onPlay}
           onOpenGrid={openGrid}
         />
       ))}

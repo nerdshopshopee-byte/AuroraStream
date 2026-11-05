@@ -347,6 +347,12 @@ export const useAurora = create<AuroraStore>((set, get) => ({
   closeEpg: () => set({ epg: null }),
 
   play: (item, episode = null, startAt = 0) => {
+    // Séries não têm streamUrl própria: sem episódio, a URL montada apontaria
+    // para /series/{series_id}.mp4 (404). Abre a ficha com os episódios.
+    if (item.type === 'series' && !episode) {
+      set({ overlay: { kind: 'details', item }, grid: null, epg: null })
+      return
+    }
     // controle parental: conteúdo +18 exige PIN (uma vez por sessão)
     if (parentalEnabled() && !isUnlocked() && isAdultItem(item)) {
       set({ pinRequest: { intent: 'play', item, episode, startAt } })
@@ -367,11 +373,28 @@ export const useAurora = create<AuroraStore>((set, get) => ({
     if (!url && item.source === 'xtream') {
       url = resolve(item.type, item.id, item.ext)
     }
+    // Guarda de integridade: sem URL de stream o player ficaria eternamente
+    // em "Bufferizando 0%". Aviso claro em vez de spinner sem fim.
+    // (acontecia quando a sessão do cliente vinha sem credenciais do painel)
+    if (!url) {
+      toast.error('Não foi possível abrir o vídeo', {
+        description:
+          'A sessão não tem as credenciais do painel. Saia e entre novamente para recarregar.',
+      })
+      return
+    }
     const finalItem = { ...item, streamUrl: url }
     if (episode) {
       let epUrl = episode.streamUrl
       if (!epUrl && episode.ext && item.type === 'series') {
         epUrl = resolve('series', episode.id, episode.ext)
+      }
+      if (!epUrl) {
+        toast.error('Não foi possível abrir o episódio', {
+          description:
+            'A sessão não tem as credenciais do painel. Saia e entre novamente para recarregar.',
+        })
+        return
       }
       set({
         player: {

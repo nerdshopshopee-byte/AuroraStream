@@ -17,7 +17,7 @@ extraResources:
 
 asar: true
 compression: normal
-buildVersion: "1.7.0"
+buildVersion: "1.8.0"
 
 # reduz ~35 MB: mantém apenas pt-BR/en-US dos locales do Electron
 electronLanguages:

@@ -50,6 +50,11 @@ export async function POST(req: NextRequest) {
       label: username,
       server,
       username,
+      // ESSENCIAL: o cliente monta as URLs de stream (movie/series/live) a
+      // partir da sessão. Sem a senha aqui, play() devolve streamUrl undefined
+      // e o player fica eternamente em "Bufferizando 0%" até a próxima
+      // recarga da página (que usa /api/auth/session, que já enviava a senha).
+      password,
       status: ui.status,
       isTrial: ui.is_trial === '1',
       activeConnections: Number(ui.active_cons ?? 0),

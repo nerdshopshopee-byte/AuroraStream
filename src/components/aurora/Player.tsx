@@ -94,6 +94,8 @@ export function Player() {
   /** falhas fatais de rede do hls.js em canais ao vivo (escala p/ remux) */
   const liveFragFailRef = useRef(0)
   const watchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /** ticker do overlay de buffering (progresso real do buffer) */
+  const bufferTickerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   /** janelas extras de 45 s enquanto o upstream responder — evita erro prematuro */
   const transcodePatienceRef = useRef(2)
 
@@ -111,6 +113,8 @@ export function Player() {
   const startAt = player.startAt ?? 0
   const epId = player.episode?.id ?? null
   const [initKey, setInitKey] = useState(`${src}|${startAt}`)
+  /** incrementado pelo "Tentar novamente" — refaz toda a cadeia de boot */
+  const [retryNonce, setRetryNonce] = useState(0)
   if (initKey !== `${src}|${startAt}`) {
     // reset ao trocar de stream/posição (padrão derivado de render)
     setInitKey(`${src}|${startAt}`)
@@ -162,10 +166,25 @@ export function Player() {
       setLevels([])
       setCurrentLevel(-1)
       video.src = target ?? src
+      // retomada de posição ("Continuar assistindo") em arquivos diretos —
+      // MP4/WebM/MOV via <video> só aceitam seek depois do loadedmetadata;
+      // sem isso o filme recomeçava do zero (hls.js e Safari já aplicavam)
+      if (startAt > 0) {
+        const seekResume = () => {
+          try {
+            const dur = video.duration
+            video.currentTime = dur > 0 ? Math.min(startAt, Math.max(0, dur - 1)) : startAt
+          } catch {
+            /* noop */
+          }
+        }
+        if (video.readyState >= 1) seekResume()
+        else video.addEventListener('loadedmetadata', seekResume, { once: true })
+      }
       safePlay(video)
       return true
     },
-    [src, noServer],
+    [src, noServer, startAt],
   )
 
   /**
@@ -322,28 +341,35 @@ export function Player() {
     if (!directFile && Hls.isSupported()) {
       const hls = new Hls({
         // ---- buffer anti-travamento ----
+        // buffers mais profundos dão fôlego quando o painel responde devagar
+        // (o proxy soma um salto de rede a cada segmento)
         enableWorker: true,
         lowLatencyMode: false,
         backBufferLength: 45,
-        maxBufferLength: isLive ? 30 : 60,
-        maxMaxBufferLength: isLive ? 90 : 240,
-        maxBufferSize: 80 * 1000 * 1000,
+        maxBufferLength: isLive ? 40 : 90,
+        maxMaxBufferLength: isLive ? 120 : 600,
+        maxBufferSize: 120 * 1000 * 1000,
         maxBufferHole: 0.5,
-        highBufferWatchdogPeriod: 2,
-        nudgeMaxRetry: 6,
+        highBufferWatchdogPeriod: 1,
+        nudgeMaxRetry: 10,
         // ---- ABR ----
-        abrEwmaDefaultEstimate: 1_500_000,
-        abrBandWidthFactor: 0.9,
-        abrBandWidthUpFactor: 0.75,
+        // estimativa inicial conservadora: começa num nível que carrega de
+        // verdade e sobe — evita o ciclo abrir/travar/abaixar/abrir
+        abrEwmaDefaultEstimate: 1_000_000,
+        abrBandWidthFactor: 0.85,
+        abrBandWidthUpFactor: 0.7,
         startLevel: -1,
         capLevelToPlayerSize: true,
+        // pré-busca do próximo fragmento enquanto o atual é anexado —
+        // fecha a brecha entre segmentos (travadas a cada 2 s em live)
+        startFragPrefetch: true,
         // ---- resiliência ----
-        fragLoadingMaxRetry: 8,
-        fragLoadingRetryDelay: 750,
+        fragLoadingMaxRetry: 10,
+        fragLoadingRetryDelay: 500,
         fragLoadingMaxRetryTimeout: 8000,
-        manifestLoadingMaxRetry: 6,
-        manifestLoadingRetryDelay: 600,
-        levelLoadingMaxRetry: 6,
+        manifestLoadingMaxRetry: 8,
+        manifestLoadingRetryDelay: 500,
+        levelLoadingMaxRetry: 8,
       })
       hlsRef.current = hls
       hls.attachMedia(video)
@@ -367,6 +393,10 @@ export function Player() {
         }
       })
       hls.on(Hls.Events.FRAG_BUFFERED, () => {
+        // fragmento carregou: recupera a confiança na rota HLS —
+        // sem este reset, falhas esparsas acumulavam e trocavam p/ remux
+        // desnecessariamente no meio de uma sessão ao vivo saudável
+        liveFragFailRef.current = 0
         const b = video.buffered
         if (b.length > 0) {
           const len = Math.max(0, b.end(b.length - 1) - video.currentTime)
@@ -452,6 +482,10 @@ export function Player() {
     return () => {
       if (watchdogRef.current) clearTimeout(watchdogRef.current)
       if (bootTimer) clearTimeout(bootTimer)
+      if (bufferTickerRef.current) {
+        clearInterval(bufferTickerRef.current)
+        bufferTickerRef.current = null
+      }
       hlsRef.current?.destroy()
       hlsRef.current = null
       // libera a mídia antes de o elemento sair do DOM — elimina o AbortError
@@ -464,7 +498,7 @@ export function Player() {
         /* noop */
       }
     }
-  }, [src, isLive, startAt, goNative, startTranscode, diagnoseTranscode])
+  }, [src, isLive, startAt, goNative, startTranscode, diagnoseTranscode, retryNonce])
 
   // ---------- eventos do vídeo ----------
   useEffect(() => {
@@ -529,21 +563,62 @@ export function Player() {
     }
     const onPlay = () => setPlaying(true)
     const onPause = () => setPlaying(false)
+    /**
+     * Bufferização com progresso REAL (buffer à frente do playhead / alvo).
+     * v1.7 usava um contador fake (+7% a cada 150 ms) que enchia em ~2 s e
+     * criava um setInterval NOVO a cada evento "waiting" sem nunca limpar os
+     * anteriores (o retorno de um listener é descartado) — o resultado era o
+     * looping de "Bufferizando… a cada 2 segundos" e intervalos zumbis
+     * re-renderizando o player para sempre.
+     */
+    const BUFFER_TARGET_SEC = 30
+    const stopBufferTicker = () => {
+      if (bufferTickerRef.current) {
+        clearInterval(bufferTickerRef.current)
+        bufferTickerRef.current = null
+      }
+    }
+    const startBufferTicker = () => {
+      stopBufferTicker()
+      // progresso imediato com o buffer já existente
+      const ahead0 = video.buffered.length
+        ? video.buffered.end(video.buffered.length - 1) - video.currentTime
+        : 0
+      setBufferPct(Math.max(0, Math.min(95, Math.round((ahead0 / BUFFER_TARGET_SEC) * 100))))
+      bufferTickerRef.current = setInterval(() => {
+        if (video.readyState >= 3 && !video.paused) {
+          stopBufferTicker()
+          setBuffering(false)
+          return
+        }
+        const ahead = video.buffered.length
+          ? video.buffered.end(video.buffered.length - 1) - video.currentTime
+          : 0
+        const pct = Math.max(0, Math.min(95, Math.round((ahead / BUFFER_TARGET_SEC) * 100)))
+        setBufferPct((p) => (pct > p || p >= 95 ? pct : p))
+      }, 200)
+    }
     const onWaiting = () => {
       setBuffering(true)
-      const t0 = Date.now()
-      const tick = setInterval(() => {
-        if (video.readyState >= 3) {
-          clearInterval(tick)
-          setBuffering(false)
-        }
-        setBufferPct((p) => (p < 95 ? p + 7 : p))
-      }, 150)
-      return () => clearInterval(tick)
+      startBufferTicker()
+    }
+    // download de dados do <video> nativo (VOD direto) — avança o % do overlay
+    const onProgressEvt = () => {
+      if (!bufferTickerRef.current) return
+      const ahead = video.buffered.length
+        ? video.buffered.end(video.buffered.length - 1) - video.currentTime
+        : 0
+      const pct = Math.max(0, Math.min(95, Math.round((ahead / BUFFER_TARGET_SEC) * 100)))
+      setBufferPct((p) => (pct > p || p >= 95 ? pct : p))
     }
     const onPlaying = () => {
+      stopBufferTicker()
       setBuffering(false)
       setBufferPct(100)
+    }
+    const onCanPlay = () => {
+      stopBufferTicker()
+      setBuffering(false)
     }
     const onEnded = () => {
       if (isVod && video.duration > 0) {
@@ -573,7 +648,9 @@ export function Player() {
     video.addEventListener('play', onPlay)
     video.addEventListener('pause', onPause)
     video.addEventListener('waiting', onWaiting)
+    video.addEventListener('progress', onProgressEvt)
     video.addEventListener('playing', onPlaying)
+    video.addEventListener('canplay', onCanPlay)
     video.addEventListener('ended', onEnded)
     video.addEventListener('volumechange', onVol)
     video.addEventListener('error', onVideoError)
@@ -583,10 +660,14 @@ export function Player() {
       video.removeEventListener('play', onPlay)
       video.removeEventListener('pause', onPause)
       video.removeEventListener('waiting', onWaiting)
+      video.removeEventListener('progress', onProgressEvt)
       video.removeEventListener('playing', onPlaying)
+      video.removeEventListener('canplay', onCanPlay)
       video.removeEventListener('ended', onEnded)
       video.removeEventListener('volumechange', onVol)
       video.removeEventListener('error', onVideoError)
+      // nunca deixar intervalos zumbis re-renderizando o player
+      stopBufferTicker()
     }
   }, [isVod, persistProgress, player, closePlayer, setBuffer, diagnoseTranscode, startTranscode])
 
@@ -840,6 +921,7 @@ export function Player() {
         ref={videoRef}
         playsInline
         autoPlay
+        preload="auto"
         className="block h-full w-full object-contain"
         onClick={(e) => {
           e.stopPropagation()
@@ -870,13 +952,14 @@ export function Player() {
             <div className="mt-4 flex justify-center gap-2">
               <button
                 onClick={() => {
-                  const video = videoRef.current
-                  if (video) {
-                    setError(null)
-                    setBuffering(true)
-                    hlsRef.current?.startLoad()
-                    safePlay(video)
-                  }
+                  // retry de verdade: re-executa o efeito de init (nonce), que
+                  // recria hls.js e refaz a cadeia HLS → direto → remux → transcode.
+                  // (o antigo só chamava hls.startLoad(), inócuo quando o hls.js
+                  // já havia sido destruído pelas rotas nativa/transcode)
+                  setError(null)
+                  setBuffering(true)
+                  setBufferPct(0)
+                  setRetryNonce((n) => n + 1)
                 }}
                 className="glass flex h-10 items-center gap-2 rounded-xl px-4 text-sm font-semibold hover:bg-white/12"
               >
